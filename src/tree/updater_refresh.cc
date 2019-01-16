@@ -4,12 +4,13 @@
  * \brief refresh the statistics and leaf value on the tree on the dataset
  * \author Tianqi Chen
  */
-
+#include <rabit/rabit.h>
 #include <xgboost/tree_updater.h>
+
 #include <vector>
 #include <limits>
+
 #include "./param.h"
-#include "../common/sync.h"
 #include "../common/io.h"
 
 namespace xgboost {
@@ -126,7 +127,6 @@ class TreeRefresher: public TreeUpdater {
     RegTree &tree = *p_tree;
     tree.Stat(nid).base_weight = static_cast<bst_float>(gstats[nid].CalcWeight(param_));
     tree.Stat(nid).sum_hess = static_cast<bst_float>(gstats[nid].sum_hess);
-    gstats[nid].SetLeafVec(param_, tree.Leafvec(nid));
     if (tree[nid].IsLeaf()) {
       if (param_.refresh_leaf) {
         tree[nid].SetLeaf(tree.Stat(nid).base_weight * param_.learning_rate);

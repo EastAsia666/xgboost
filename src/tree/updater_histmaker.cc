@@ -4,11 +4,12 @@
  * \brief use histogram counting to construct a tree
  * \author Tianqi Chen
  */
+#include <rabit/rabit.h>
 #include <xgboost/base.h>
 #include <xgboost/tree_updater.h>
 #include <vector>
 #include <algorithm>
-#include "../common/sync.h"
+
 #include "../common/quantile.h"
 #include "../common/group_data.h"
 #include "./updater_basemaker-inl.h"
@@ -242,12 +243,8 @@ class HistMaker: public BaseMaker {
       p_tree->Stat(nid).loss_chg = best.loss_chg;
       // now we know the solution in snode[nid], set split
       if (best.loss_chg > kRtEps) {
-        p_tree->AddChilds(nid);
-        (*p_tree)[nid].SetSplit(best.SplitIndex(),
-                                 best.split_value, best.DefaultLeft());
-        // mark right child as 0, to indicate fresh leaf
-        (*p_tree)[(*p_tree)[nid].LeftChild()].SetLeaf(0.0f, 0);
-        (*p_tree)[(*p_tree)[nid].RightChild()].SetLeaf(0.0f, 0);
+        p_tree->ExpandNode(nid, best.SplitIndex(), best.split_value,
+                          best.DefaultLeft());
         // right side sum
         TStats right_sum;
         right_sum.SetSubstract(node_sum, left_sum[wid]);
@@ -262,7 +259,6 @@ class HistMaker: public BaseMaker {
   inline void SetStats(RegTree *p_tree, int nid, const TStats &node_sum) {
     p_tree->Stat(nid).base_weight = static_cast<bst_float>(node_sum.CalcWeight(param_));
     p_tree->Stat(nid).sum_hess = static_cast<bst_float>(node_sum.sum_hess);
-    node_sum.SetLeafVec(param_, p_tree->Leafvec(nid));
   }
 };
 

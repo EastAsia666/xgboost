@@ -3,18 +3,26 @@
 # pylint: disable=too-many-branches, too-many-lines, W0141
 """Core XGBoost Library."""
 from __future__ import absolute_import
-
 import collections
+# pylint: disable=no-name-in-module,import-error
+try:
+    from collections.abc import Mapping  # Python 3
+except ImportError:
+    from collections import Mapping  # Python 2
+# pylint: enable=no-name-in-module,import-error
 import ctypes
 import os
 import re
 import sys
+import warnings
 
 import numpy as np
 import scipy.sparse
 
-from .compat import STRING_TYPES, PY3, DataFrame, MultiIndex, py_str, PANDAS_INSTALLED, DataTable
+from .compat import (STRING_TYPES, PY3, DataFrame, MultiIndex, py_str,
+                     PANDAS_INSTALLED, DataTable)
 from .libpath import find_lib_path
+
 
 # c_bst_ulong corresponds to bst_ulong defined in xgboost/c_api.h
 c_bst_ulong = ctypes.c_uint64
@@ -117,18 +125,23 @@ def _load_lib():
     lib_paths = find_lib_path()
     if len(lib_paths) == 0:
         return None
-    pathBackup = os.environ['PATH']
+    try:
+        pathBackup = os.environ['PATH'].split(os.pathsep)
+    except KeyError:
+        pathBackup = []
     lib_success = False
     os_error_list = []
     for lib_path in lib_paths:
         try:
             # needed when the lib is linked with non-system-available dependencies
-            os.environ['PATH'] = pathBackup + os.pathsep + os.path.dirname(lib_path)
+            os.environ['PATH'] = os.pathsep.join(pathBackup + [os.path.dirname(lib_path)])
             lib = ctypes.cdll.LoadLibrary(lib_path)
             lib_success = True
         except OSError as e:
             os_error_list.append(str(e))
             continue
+        finally:
+            os.environ['PATH'] = os.pathsep.join(pathBackup)
     if not lib_success:
         libname = os.path.basename(lib_paths[0])
         raise XGBoostError(
@@ -368,6 +381,10 @@ class DMatrix(object):
         label = _maybe_pandas_label(label)
         label = _maybe_dt_array(label)
         weight = _maybe_dt_array(weight)
+
+        if isinstance(data, list):
+            warnings.warn('Initializing DMatrix from List is deprecated.',
+                          DeprecationWarning)
 
         if isinstance(data, STRING_TYPES):
             self.handle = ctypes.c_void_p()
@@ -1016,7 +1033,7 @@ class Booster(object):
         value: optional
            value of the specified parameter, when params is str key
         """
-        if isinstance(params, collections.Mapping):
+        if isinstance(params, Mapping):
             params = params.items()
         elif isinstance(params, STRING_TYPES) and value is not None:
             params = [(params, value)]
@@ -1432,7 +1449,7 @@ class Booster(object):
             One of the importance types defined above.
         """
 
-        if self.booster != 'gbtree':
+        if getattr(self, 'booster', None) is not None and self.booster != 'gbtree':
             raise ValueError('Feature importance is not defined for Booster type {}'
                              .format(self.booster))
 

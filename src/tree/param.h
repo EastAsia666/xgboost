@@ -34,8 +34,7 @@ struct TrainParam : public dmlc::Parameter<TrainParam> {
   // growing policy
   enum TreeGrowPolicy { kDepthWise = 0, kLossGuide = 1 };
   int grow_policy;
-  // flag to print out detailed breakdown of runtime
-  int debug_verbose;
+
   //----- the rest parameters are less important ----
   // minimum amount of hessian(weight) allowed in a child
   float min_child_weight;
@@ -51,7 +50,9 @@ struct TrainParam : public dmlc::Parameter<TrainParam> {
   float max_delta_step;
   // whether we want to do subsample
   float subsample;
-  // whether to subsample columns each split, in each level
+  // whether to subsample columns in each split (node)
+  float colsample_bynode;
+  // whether to subsample columns in each level
   float colsample_bylevel;
   // whether to subsample columns during tree construction
   float colsample_bytree;
@@ -67,8 +68,6 @@ struct TrainParam : public dmlc::Parameter<TrainParam> {
   int parallel_option;
   // option to open cacheline optimization
   bool cache_opt;
-  // whether to not print info during training.
-  bool silent;
   // whether refresh updater needs to update the leaf values
   bool refresh_leaf;
   // auxiliary data structure
@@ -77,10 +76,25 @@ struct TrainParam : public dmlc::Parameter<TrainParam> {
   int gpu_id;
   // number of GPUs to use
   int n_gpus;
-  // number of rows in a single GPU batch
-  int gpu_batch_nrows;
   // the criteria to use for ranking splits
   std::string split_evaluator;
+
+  // ------ From cpu quantile histogram -------.
+  // percentage threshold for treating a feature as sparse
+  // e.g. 0.2 indicates a feature with fewer than 20% nonzeros is considered sparse
+  double sparse_threshold;
+  // use feature grouping? (default yes)
+  int enable_feature_grouping;
+  // when grouping features, how many "conflicts" to allow.
+  // conflict is when an instance has nonzero values for two or more features
+  // default is 0, meaning features should be strictly complementary
+  double max_conflict_rate;
+  // when grouping features, how much effort to expend to prevent singleton groups
+  // we'll try to insert each feature into existing groups before creating a new group
+  // for that feature; to save time, only up to (max_search_group) of existing groups
+  // will be considered. If set to zero, ALL existing groups will be examined
+  unsigned max_search_group;
+
   // declare the parameters
   DMLC_DECLARE_PARAMETER(TrainParam) {
     DMLC_DECLARE_FIELD(learning_rate)
@@ -92,10 +106,6 @@ struct TrainParam : public dmlc::Parameter<TrainParam> {
         .set_default(0.0f)
         .describe(
             "Minimum loss reduction required to make a further partition.");
-    DMLC_DECLARE_FIELD(debug_verbose)
-        .set_lower_bound(0)
-        .set_default(0)
-        .describe("flag to print out detailed breakdown of runtime");
     DMLC_DECLARE_FIELD(max_depth)
         .set_lower_bound(0)
         .set_default(6)
@@ -141,6 +151,10 @@ struct TrainParam : public dmlc::Parameter<TrainParam> {
         .set_range(0.0f, 1.0f)
         .set_default(1.0f)
         .describe("Row subsample ratio of training instance.");
+    DMLC_DECLARE_FIELD(colsample_bynode)
+        .set_range(0.0f, 1.0f)
+        .set_default(1.0f)
+        .describe("Subsample ratio of columns, resample on each node (split).");
     DMLC_DECLARE_FIELD(colsample_bylevel)
         .set_range(0.0f, 1.0f)
         .set_default(1.0f)
@@ -171,9 +185,6 @@ struct TrainParam : public dmlc::Parameter<TrainParam> {
     DMLC_DECLARE_FIELD(cache_opt)
         .set_default(true)
         .describe("EXP Param: Cache aware optimization.");
-    DMLC_DECLARE_FIELD(silent)
-        .set_default(false)
-        .describe("Do not print information during trainig.");
     DMLC_DECLARE_FIELD(refresh_leaf)
         .set_default(true)
         .describe("Whether the refresh updater needs to update leaf values.");
@@ -188,14 +199,27 @@ struct TrainParam : public dmlc::Parameter<TrainParam> {
         .set_lower_bound(-1)
         .set_default(1)
         .describe("Number of GPUs to use for multi-gpu algorithms: -1=use all GPUs");
-    DMLC_DECLARE_FIELD(gpu_batch_nrows)
-        .set_lower_bound(-1)
-        .set_default(0)
-        .describe("Number of rows in a GPU batch, used for finding quantiles on GPU; "
-                  "-1 to use all rows assignted to a GPU, and 0 to auto-deduce");
     DMLC_DECLARE_FIELD(split_evaluator)
         .set_default("elastic_net,monotonic,interaction")
         .describe("The criteria to use for ranking splits");
+
+    // ------ From cpu quantile histogram -------.
+    DMLC_DECLARE_FIELD(sparse_threshold).set_range(0, 1.0).set_default(0.2)
+        .describe("percentage threshold for treating a feature as sparse");
+    DMLC_DECLARE_FIELD(enable_feature_grouping).set_lower_bound(0).set_default(0)
+        .describe("if >0, enable feature grouping to ameliorate work imbalance "
+                  "among worker threads");
+    DMLC_DECLARE_FIELD(max_conflict_rate).set_range(0, 1.0).set_default(0)
+        .describe("when grouping features, how many \"conflicts\" to allow."
+       "conflict is when an instance has nonzero values for two or more features."
+       "default is 0, meaning features should be strictly complementary.");
+    DMLC_DECLARE_FIELD(max_search_group).set_lower_bound(0).set_default(100)
+        .describe("when grouping features, how much effort to expend to prevent "
+                  "singleton groups. We'll try to insert each feature into existing "
+                  "groups before creating a new group for that feature; to save time, "
+                  "only up to (max_search_group) of existing groups will be "
+                  "considered. If set to zero, ALL existing groups will be examined.");
+
     // add alias of parameters
     DMLC_DECLARE_ALIAS(reg_lambda, lambda);
     DMLC_DECLARE_ALIAS(reg_alpha, alpha);
@@ -380,8 +404,6 @@ template <typename ParamT>
   }
   /*! \return whether the statistics is not used yet */
   inline bool Empty() const { return sum_hess == 0.0; }
-  /*! \brief set leaf vector value based on statistics */
-  inline void SetLeafVec(const TrainParam& param, bst_float* vec) const {}
   // constructor to allow inheritance
   GradStats() = default;
   /*! \brief add statistics to the data */
@@ -518,7 +540,7 @@ struct SplitEntry {
       this->loss_chg = new_loss_chg;
       if (default_left) {
         split_index |= (1U << 31);
-}
+      }
       this->sindex = split_index;
       this->split_value = new_split_value;
       return true;

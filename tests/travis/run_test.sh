@@ -26,6 +26,12 @@ if [ ${TASK} == "lint" ]; then
     # Fail only on warnings related to XGBoost source files
     (cat logtidy.txt|grep -E 'xgboost.*warning'|grep -v dmlc-core) && exit -1
     echo "----------------------------"
+
+    if grep -R '<regex>' src include tests/cpp plugin jvm-packages amalgamation; then
+        echo 'Do not use std::regex, since it is not supported by GCC 4.8.x'
+        exit -1
+    fi
+
     exit 0
 fi
 
@@ -47,7 +53,7 @@ if [ ${TASK} == "python_test" ]; then
     echo "-------------------------------"
     source activate python3
     python --version
-    conda install numpy scipy pandas matplotlib nose scikit-learn
+    conda install numpy scipy pandas matplotlib scikit-learn
 
     # Install data table from source
     wget http://releases.llvm.org/5.0.2/clang+llvm-5.0.2-x86_64-linux-gnu-ubuntu-14.04.tar.xz
@@ -56,35 +62,37 @@ if [ ${TASK} == "python_test" ]; then
     python -m pip install datatable --no-binary datatable
 
     python -m pip install graphviz pytest pytest-cov codecov
-    python -m nose -v tests/python || exit -1
-    py.test tests/python --cov=python-package/xgboost
+    py.test -v --fulltrace -s tests/python --cov=python-package/xgboost || exit -1
     codecov
+
     source activate python2
     echo "-------------------------------"
     python --version
-    conda install numpy scipy pandas matplotlib nose scikit-learn
+    conda install numpy scipy pandas matplotlib scikit-learn
     python -m pip install graphviz
-    python -m nose -v tests/python || exit -1
+    py.test -v --fulltrace -s tests/python || exit -1
     exit 0
 fi
 
 if [ ${TASK} == "python_lightweight_test" ]; then
     make all || exit -1
+
     echo "-------------------------------"
     source activate python3
     python --version
-    conda install numpy scipy nose
+    conda install numpy scipy
     python -m pip install graphviz pytest pytest-cov codecov
-    python -m nose -v tests/python || exit -1
-    py.test tests/python --cov=python-package/xgboost
+    py.test -v --fulltrace -s tests/python --cov=python-package/xgboost || exit -1
     codecov
+
     source activate python2
     echo "-------------------------------"
     python --version
-    conda install numpy scipy nose
+    conda install numpy scipy pytest
     python -m pip install graphviz
-    python -m nose -v tests/python || exit -1
     python -m pip install flake8==3.4.1
+    py.test -v --fulltrace -s tests/python || exit -1
+
     flake8 --ignore E501 python-package || exit -1
     flake8 --ignore E501 tests/python || exit -1
     exit 0
@@ -147,6 +155,11 @@ fi
 if [ ${TASK} == "distributed_test" ]; then
     set -e
     make all || exit -1
+    echo "-------------------------------"
+    source activate python3
+    python --version
+    conda install numpy scipy
+    python -m pip install kubernetes
     cd tests/distributed
     ./runtests.sh
 fi

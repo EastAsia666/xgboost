@@ -120,7 +120,7 @@ class SpanIterator {
 
   using reference = typename std::conditional<                    // NOLINT
     IsConst, const ElementType, ElementType>::type&;
-  using pointer = typename std::add_pointer<reference>::type&;    // NOLINT
+  using pointer = typename std::add_pointer<reference>::type;     // NOLINT
 
   XGBOOST_DEVICE constexpr SpanIterator() : span_{nullptr}, index_{0} {}
 
@@ -621,8 +621,8 @@ XGBOOST_DEVICE auto as_writable_bytes(Span<T, E> s) __span_noexcept ->  // NOLIN
   return {reinterpret_cast<byte*>(s.data()), s.size_bytes()};
 }
 
-}  // namespace common
-}  // namespace xgboost
+}  // namespace common NOLINT
+}  // namespace xgboost NOLINT
 
 #if defined(_MSC_VER) &&_MSC_VER < 1910
 #undef constexpr

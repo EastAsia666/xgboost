@@ -5,6 +5,7 @@ from __future__ import absolute_import
 
 import numpy as np
 import warnings
+import json
 from .core import Booster, DMatrix, XGBoostError
 from .training import train
 
@@ -99,6 +100,9 @@ class XGBModel(XGBModelBase):
     missing : float, optional
         Value in the data which needs to be present as a missing value. If
         None, defaults to np.nan.
+    importance_type: string, default "gain"
+        The feature importance type for the feature_importances_ property: either "gain",
+        "weight", "cover", "total_gain" or "total_cover".
     \*\*kwargs : dict, optional
         Keyword arguments for XGBoost Booster object.  Full documentation of parameters can
         be found here: https://github.com/dmlc/xgboost/blob/master/doc/parameter.rst.
@@ -132,7 +136,8 @@ class XGBModel(XGBModelBase):
                  n_jobs=1, nthread=None, gamma=0, min_child_weight=1, max_delta_step=0,
                  subsample=1, colsample_bytree=1, colsample_bylevel=1,
                  reg_alpha=0, reg_lambda=1, scale_pos_weight=1,
-                 base_score=0.5, random_state=0, seed=None, missing=None, **kwargs):
+                 base_score=0.5, random_state=0, seed=None, missing=None,
+                 importance_type="gain", **kwargs):
         if not SKLEARN_INSTALLED:
             raise XGBoostError('sklearn needs to be installed in order to use this module')
         self.max_depth = max_depth
@@ -158,6 +163,7 @@ class XGBModel(XGBModelBase):
         self.random_state = random_state
         self.nthread = nthread
         self.n_jobs = n_jobs
+        self.importance_type = importance_type
 
     def __setstate__(self, state):
         # backward compatibility code
@@ -231,7 +237,7 @@ class XGBModel(XGBModelBase):
         else:
             xgb_params['nthread'] = n_jobs
 
-        xgb_params['silent'] = 1 if self.silent else 0
+        xgb_params['verbosity'] = 0 if self.silent else 0
 
         if xgb_params['nthread'] <= 0:
             xgb_params.pop('nthread', None)
@@ -240,6 +246,13 @@ class XGBModel(XGBModelBase):
     def save_model(self, fname):
         """
         Save the model to a file.
+
+        The model is saved in an XGBoost internal binary format which is
+        universal among the various XGBoost interfaces. Auxiliary attributes of
+        the Python Booster object (such as feature names) will not be loaded.
+        Label encodings (text labels to numeric labels) will be also lost.
+        **If you are using only the Python interface, we recommend pickling the
+        model object for best results.**
 
         Parameters
         ----------
@@ -251,6 +264,13 @@ class XGBModel(XGBModelBase):
     def load_model(self, fname):
         """
         Load the model from a file.
+
+        The model is loaded from an XGBoost internal binary format which is
+        universal among the various XGBoost interfaces. Auxiliary attributes of
+        the Python Booster object (such as feature names) will not be loaded.
+        Label encodings (text labels to numeric labels) will be also lost.
+        **If you are using only the Python interface, we recommend pickling the
+        model object for best results.**
 
         Parameters
         ----------
@@ -498,11 +518,64 @@ class XGBModel(XGBModelBase):
         feature_importances_ : array of shape ``[n_features]``
 
         """
+        if getattr(self, 'booster', None) is not None and self.booster != 'gbtree':
+            raise AttributeError('Feature importance is not defined for Booster type {}'
+                                 .format(self.booster))
         b = self.get_booster()
-        fs = b.get_fscore()
-        all_features = [fs.get(f, 0.) for f in b.feature_names]
+        score = b.get_score(importance_type=self.importance_type)
+        all_features = [score.get(f, 0.) for f in b.feature_names]
         all_features = np.array(all_features, dtype=np.float32)
         return all_features / all_features.sum()
+
+    @property
+    def coef_(self):
+        """
+        Coefficients property
+
+        .. note:: Coefficients are defined only for linear learners
+
+            Coefficients are only defined when the linear model is chosen as base
+            learner (`booster=gblinear`). It is not defined for other base learner types, such
+            as tree learners (`booster=gbtree`).
+
+        Returns
+        -------
+        coef_ : array of shape ``[n_features]`` or ``[n_classes, n_features]``
+        """
+        if getattr(self, 'booster', None) is not None and self.booster != 'gblinear':
+            raise AttributeError('Coefficients are not defined for Booster type {}'
+                                 .format(self.booster))
+        b = self.get_booster()
+        coef = np.array(json.loads(b.get_dump(dump_format='json')[0])['weight'])
+        # Logic for multiclass classification
+        n_classes = getattr(self, 'n_classes_', None)
+        if n_classes is not None:
+            if n_classes > 2:
+                assert len(coef.shape) == 1
+                assert coef.shape[0] % n_classes == 0
+                coef = coef.reshape((n_classes, -1))
+        return coef
+
+    @property
+    def intercept_(self):
+        """
+        Intercept (bias) property
+
+        .. note:: Intercept is defined only for linear learners
+
+            Intercept (bias) is only defined when the linear model is chosen as base
+            learner (`booster=gblinear`). It is not defined for other base learner types, such
+            as tree learners (`booster=gbtree`).
+
+        Returns
+        -------
+        intercept_ : array of shape ``(1,)`` or ``[n_classes]``
+        """
+        if getattr(self, 'booster', None) is not None and self.booster != 'gblinear':
+            raise AttributeError('Intercept (bias) is not defined for Booster type {}'
+                                 .format(self.booster))
+        b = self.get_booster()
+        return np.array(json.loads(b.get_dump(dump_format='json')[0])['bias'])
 
 
 class XGBClassifier(XGBModel, XGBClassifierBase):
@@ -558,11 +631,11 @@ class XGBClassifier(XGBModel, XGBClassifierBase):
         early_stopping_rounds : int, optional
             Activates early stopping. Validation error needs to decrease at
             least every <early_stopping_rounds> round(s) to continue training.
-            Requires at least one item in evals.  If there's more than one,
-            will use the last. Returns the model from the last iteration
-            (not the best one). If early stopping occurs, the model will
-            have three additional fields: bst.best_score, bst.best_iteration
-            and bst.best_ntree_limit.
+            Requires at least one item in evals. If there's more than one,
+            will use the last. If early stopping occurs, the model will have
+            three additional fields: bst.best_score, bst.best_iteration and
+            bst.best_ntree_limit (bst.best_ntree_limit is the ntree_limit parameter
+            default value in predict method if not any other value is specified).
             (Use bst.best_ntree_limit to get the correct value if num_parallel_tree
             and/or num_class appears in the parameters)
         verbose : bool
@@ -907,7 +980,7 @@ class XGBRanker(XGBModel):
                                         base_score, random_state, seed, missing)
         if callable(self.objective):
             raise ValueError("custom objective function not supported by XGBRanker")
-        elif self.objective != "rank:pairwise":
+        elif "rank:" not in self.objective:
             raise ValueError("please use XGBRanker for ranking task")
 
     def fit(self, X, y, group, sample_weight=None, eval_set=None, sample_weight_eval_set=None,

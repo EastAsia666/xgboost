@@ -5,12 +5,12 @@
           a refresh is needed to make the statistics exactly correct
  * \author Tianqi Chen
  */
-
+#include <rabit/rabit.h>
 #include <xgboost/base.h>
 #include <xgboost/tree_updater.h>
 #include <vector>
 #include <algorithm>
-#include "../common/sync.h"
+
 #include "../common/quantile.h"
 #include "../common/group_data.h"
 #include "./updater_basemaker-inl.h"
@@ -127,9 +127,6 @@ class SketchMaker: public BaseMaker {
     /*! \brief same as add, reduce is used in All Reduce */
     inline static void Reduce(SKStats &a, const SKStats &b) { // NOLINT(*)
       a.Add(b);
-    }
-    /*! \brief set leaf vector value based on statistics */
-    inline void SetLeafVec(const TrainParam &param, bst_float *vec) const {
     }
   };
   inline void BuildSketch(const std::vector<GradientPair> &gpair,
@@ -288,12 +285,8 @@ class SketchMaker: public BaseMaker {
       this->SetStats(nid, node_stats_[nid], p_tree);
       // now we know the solution in snode[nid], set split
       if (best.loss_chg > kRtEps) {
-        p_tree->AddChilds(nid);
-        (*p_tree)[nid].SetSplit(best.SplitIndex(),
-                                 best.split_value, best.DefaultLeft());
-        // mark right child as 0, to indicate fresh leaf
-        (*p_tree)[(*p_tree)[nid].LeftChild()].SetLeaf(0.0f, 0);
-        (*p_tree)[(*p_tree)[nid].RightChild()].SetLeaf(0.0f, 0);
+        p_tree->ExpandNode(nid, best.SplitIndex(), best.split_value,
+                          best.DefaultLeft());
       } else {
         (*p_tree)[nid].SetLeaf(p_tree->Stat(nid).base_weight * param_.learning_rate);
       }
@@ -303,7 +296,6 @@ class SketchMaker: public BaseMaker {
   inline void SetStats(int nid, const SKStats &node_sum, RegTree *p_tree) {
     p_tree->Stat(nid).base_weight = static_cast<bst_float>(node_sum.CalcWeight(param_));
     p_tree->Stat(nid).sum_hess = static_cast<bst_float>(node_sum.sum_hess);
-    node_sum.SetLeafVec(param_, p_tree->Leafvec(nid));
   }
   inline void EnumerateSplit(const WXQSketch::Summary &pos_grad,
                              const WXQSketch::Summary &neg_grad,
